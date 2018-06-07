@@ -40,6 +40,7 @@ defmodule Sqlite.Ecto2 do
 
   # And provide a custom storage implementation
   @behaviour Ecto.Adapter.Storage
+  @behaviour Ecto.Adapter.Structure
 
   ## Custom SQLite Types
 
@@ -153,4 +154,60 @@ defmodule Sqlite.Ecto2 do
 
   @doc false
   def supports_ddl_transaction?, do: true
+
+  def structure_load(default, opts) do
+    path = opts[:dump_path] || Path.join(default, "structure.sql")
+
+    case run_cmd(opts[:database], "< #{default}/structure.sql") do
+      {"", 0} -> {:ok, path}
+      {out, _} -> {:error, out}
+    end
+  end
+
+  def structure_dump(default, opts) do
+    table = opts[:migration_source] || "schema_migrations"
+    path  = opts[:dump_path] || Path.join(default, "structure.sql")
+
+    with {:ok, versions} <- select_versions(table, opts[:database]),
+         {"", 0} <- run_cmd(opts[:database], ".schema > #{default}/structure.sql"),
+         :ok <- append_versions(table, path, versions) do
+      {:ok, path}
+    else
+      result -> raise RuntimeError, "#{inspect result}"
+    end
+  end
+
+  defp select_versions(table, database) do
+    case Sqlitex.with_db(database, fn db ->
+      Sqlitex.query(db, "SELECT version FROM #{table} ORDER BY version")
+    end) do
+      {:ok, versions} -> {:ok, versions}
+      {:error, {:sqlite_error, 'no such table: schema_migrations'}} ->
+        {:ok, []}
+      {:error, error} ->
+        {:error, "#{inspect error}"}
+    end
+  end
+
+  defp append_versions(_, _, []), do: :ok
+  defp append_versions(table, path, versions) do
+    content = File.read!(path)
+
+    insert =
+      versions
+      |> Enum.map(fn version -> version[:version] end)
+      |> Enum.join(", ")
+      |> String.replace_prefix("", "\n\nINSERT INTO #{table} (version) VALUES (")
+      |> String.replace_suffix("", ");\n\n")
+
+    File.write!(path, content <> insert)
+  end
+
+  defp run_cmd(database, str) do
+    unless System.find_executable("sqlite3") do
+      raise "The executable for sqlite3 could not be found"
+    end
+
+    System.cmd("/bin/sh", ["-c", "sqlite3 #{database} #{str}"])
+  end
 end
